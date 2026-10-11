@@ -14,33 +14,24 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 # Импорты из других модулей
-from config import CONFIG, FRESH_ONLY, _TICK_TIMEOUT, MAX_WORKERS, USE_STRATEGY_V2
+from config import CONFIG, FRESH_ONLY, _TICK_TIMEOUT, MAX_WORKERS
 from utils import normalize_tf, within_news_blackout, utcnow, _TF_TO_SEC, MAX_DELAY_SEC, _fmt_price
 from binance import FEATURE_CACHE, LAST_SIGNAL
-from strategy import compute_features, evaluate_signal
+from strategy import compute_features
 from handlers.message_render import render_signal_card_short
 from strategy.logs import SignalLog
 
-# Импорты для v2 стратегии (если включена)
-if USE_STRATEGY_V2:
-    from jobs.strategy_adapter import evaluate_signal_v2, format_signal_message_v2
-
-
 def _evaluate_signal_unified(symbol: str, timeframe: str, features: Dict[str, Any], uid: int = None) -> Dict[str, Any]:
-    """
-    Унифицированная функция для вызова старой или новой стратегии.
-    Возвращает единый формат результата.
-    """
-    if USE_STRATEGY_V2:
-        # Новая стратегия v2
-        result = evaluate_signal_v2(symbol=symbol, timeframe=timeframe, features=features, uid=uid)
-        if result and result.get("signal"):
-            # Добавляем symbol для совместимости
-            result["symbol"] = symbol
-        return result if result else {}
-    else:
-        # Старая стратегия
-        return evaluate_signal(symbol, features)
+    """Оценка сигнала пайплайном стратегии. Возвращает {} или {signal, log, reason, symbol, features}."""
+    # ленивый импорт: адаптер тянет handlers.message_render → handlers → jobs (цикл)
+    from jobs.strategy_adapter import evaluate_signal_v2
+    result = evaluate_signal_v2(symbol=symbol, timeframe=timeframe, features=features, uid=uid)
+    if not result or not result.get("signal"):
+        return {}
+    result["symbol"] = symbol
+    # apply_levels_influence ждёт res["features"]["ATR"]
+    result["features"] = {"ATR": float(features.get("atr", 0.0))}
+    return result
 
 
 from database import (
@@ -114,15 +105,8 @@ def format_signal_message(res: Dict[str, Any], tf: str, uid: Optional[int] = Non
     tv_sym = symbol.replace("USDT", "USDT.P")
     tv_url = f"https://www.tradingview.com/chart/?symbol=BINANCE%3A{tv_sym}"
     
-    # Если используется v2 и есть SignalLog
-    if USE_STRATEGY_V2 and res.get("log"):
-        log = res["log"]
-        text = format_signal_message_v2(log, tv_url=tv_url, uid=uid)
-    else:
-        # Используем простой рендер по новому ТЗ с timezone пользователя
-        from handlers.message_render import render_signal_simple
-        
-        text = render_signal_simple(res, tf, uid=uid)
+    from jobs.strategy_adapter import format_signal_message_v2
+    text = format_signal_message_v2(res["log"], tv_url=tv_url, uid=uid)
     
     # Клавиатура (базовая: только график, кнопка "Зайти в позицию" добавляется позже)
     kb_rows = [
@@ -404,8 +388,8 @@ def tick_once_for_user(uid: int):
                 if db_enabled():
                     sig = res["signal"]
                     # Извлекаем mode и trigger_type для v2
-                    mode = res.get("log", {}).mode if USE_STRATEGY_V2 and res.get("log") else None
-                    trigger = res.get("log", {}).trigger_type if USE_STRATEGY_V2 and res.get("log") else None
+                    mode = res["log"].mode if res.get("log") else None
+                    trigger = res["log"].trigger_type if res.get("log") else None
                     sig_id = db_log_signal(uid, s, tf, bar_ts, side, sig["entry"], sig["sl"], sig["tp1"], sig["tp2"], res["reason"], mode=mode, trigger_type=trigger)
                     if sig_id:
                         rows.append([InlineKeyboardButton("✅ Зайти в позицию", callback_data=f"enter:{sig_id}")])
@@ -469,8 +453,8 @@ def tick_once_for_user(uid: int):
         if db_enabled():
             sig = chosen_res["signal"]
             # Извлекаем mode и trigger_type для v2
-            mode = chosen_res.get("log", {}).mode if USE_STRATEGY_V2 and chosen_res.get("log") else None
-            trigger = chosen_res.get("log", {}).trigger_type if USE_STRATEGY_V2 and chosen_res.get("log") else None
+            mode = chosen_res["log"].mode if chosen_res.get("log") else None
+            trigger = chosen_res["log"].trigger_type if chosen_res.get("log") else None
             sig_id = db_log_signal(uid, s, chosen_tf, bar_ts, side, sig["entry"], sig["sl"], sig["tp1"], sig["tp2"], chosen_res["reason"], mode=mode, trigger_type=trigger)
             if sig_id:
                 rows.append([InlineKeyboardButton("✅ Зайти в позицию", callback_data=f"enter:{sig_id}")])
