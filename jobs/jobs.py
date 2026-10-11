@@ -344,13 +344,13 @@ def tick_once_for_user(uid: int):
         try:
             s_, tf_, res_ = fut.result(timeout=CONFIG.get("EVAL_TIMEOUT_S", 20))
             evaluated[(s_, tf_)] = res_
-            if res_.get("side"):
-                print(f"[TICK] Signal candidate: {s_} {tf_} → {res_.get('side')}")
+            if (res_.get("signal") or {}).get("side"):
+                print(f"[TICK] Signal candidate: {s_} {tf_} → {res_['signal']['side']}")
         except Exception as e:
             print(f"[TICK] evaluate_signal failed: {e}")
             continue
     
-    print(f"[TICK] Found {len([r for r in evaluated.values() if r.get('side')])} signal candidates")
+    print(f"[TICK] Found {len([r for r in evaluated.values() if (r.get('signal') or {}).get('side')])} signal candidates")
 
     # Helper: собрать контекст-фичи по символу
     def _ctx_feats(symbol: str) -> Dict[str, Dict[str, Any]]:

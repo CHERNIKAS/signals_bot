@@ -5,12 +5,10 @@
 
 from typing import Dict, Any, Optional, List
 
+import pandas as pd
+import yaml
+
 from binance import (
-    binance_klines,
-    binance_premium_index,
-    binance_open_interest_hist,
-    binance_taker_long_short,
-    binance_ls_top_accounts,
     atr,
     rolling_pct_delta,
     pct_change,
@@ -24,6 +22,19 @@ from config import (
     ATR_RELATIVE_MIN, ATR_RELATIVE_MAX,
     get_liquidity_regime, is_time_banned,
 )
+from market import (
+    closed_klines,
+    premium_snapshot,
+    funding_24h,
+    stats_period,
+    open_interest_hist,
+    taker_ratio_hist,
+    top_ls_accounts_hist,
+    btc_context,
+)
+
+with open("config/thresholds.yaml", "r", encoding="utf-8") as _f:
+    _THRESHOLDS = yaml.safe_load(_f) or {}
 
 
 # =============================================================================
@@ -134,26 +145,55 @@ def is_atr_context_ok(atr_now: float, atr_base: Optional[float] = None) -> tuple
 # FEATURES COMPUTATION
 # =============================================================================
 
+def _mode_for_tf(tf: str) -> str:
+    return _THRESHOLDS.get("tf_to_mode", {}).get(tf, "intraday")
+
+
+def _btc_anchor_tfs(tf: str) -> List[str]:
+    return _THRESHOLDS.get("btc", {}).get("wind_anchor_tfs", {}).get(_mode_for_tf(tf), [tf])
+
+
+def _align_stats(df, last_close_ms: int):
+    """Отбрасываем точки статистики новее закрытия последнего бара — без заглядывания вперёд."""
+    if df is None or df.empty:
+        return df
+    return df[df["timestamp"] <= last_close_ms + 1]
+
+
 def compute_features(symbol: str, tf: str, lookback: int) -> Dict[str, Any]:
     """
-    Вычисляет все технические индикаторы и фичи для анализа рынка.
-    Собирает данные: свечи, премия, OI, taker ratio, top accounts.
+    Собирает фичи для обеих версий стратегии по ЗАКРЫТЫМ свечам.
+
+    Данные идут через market.* (общий кэш на всех пользователей, только закрытые бары,
+    funding нормализован на интервал начисления). Все ряды — ASC (старые → новые).
+
+    Ключи для v2: ohlc, oi_data, btc_data, atr_btc, funding_24h_sign, bar_open_ms, bar_close_ms.
+    Legacy-ключи v1 сохранены (price, volume, oi, funding, basis, taker_buy_share, ...).
     """
-    kl = binance_klines(symbol, tf, limit=lookback).reset_index(drop=True)
+    kl = closed_klines(symbol, tf, limit=lookback)
     if kl is None or len(kl) < 30:
-        raise RuntimeError(f"Not enough klines for {symbol}")
+        raise RuntimeError(f"Not enough closed klines for {symbol} {tf}")
 
-    premium = binance_premium_index(symbol)
-    oi = binance_open_interest_hist(symbol, period=tf, limit=min(lookback, 30))
-    taker_ratio, taker_share = binance_taker_long_short(symbol, period=tf, limit=min(lookback, 30))
-    ls_top = binance_ls_top_accounts(symbol, period=tf, limit=min(lookback, 30))
+    last_close_ms = int(kl["close_time"].iloc[-1])
+    period = stats_period(tf)
 
-    price = kl["close"]
-    vol = kl["volume"]
-    
+    premium = premium_snapshot(symbol)
+    oi_df = _align_stats(open_interest_hist(symbol, period, limit=200), last_close_ms)
+    taker_df = _align_stats(taker_ratio_hist(symbol, period, limit=60), last_close_ms)
+    ls_df = _align_stats(top_ls_accounts_hist(symbol, period, limit=60), last_close_ms)
+    f24 = funding_24h(symbol)
+
+    oi = oi_df["open_interest"].reset_index(drop=True) if oi_df is not None and not oi_df.empty else pd.Series(dtype=float)
+    taker_share = taker_df["buy_share"] if taker_df is not None and not taker_df.empty else pd.Series(dtype=float)
+    taker_ratio = taker_df["buy_sell_ratio"] if taker_df is not None and not taker_df.empty else pd.Series(dtype=float)
+    ls_top = ls_df["long_short_ratio"] if ls_df is not None and not ls_df.empty else pd.Series(dtype=float)
+
+    price = kl["close"].reset_index(drop=True)
+    vol = kl["volume"].reset_index(drop=True)
+
     # Расчёт ATR и волатильности
     atr_len = CONFIG["sl_tp"]["atr_len"]
-    atr_now = float(atr(kl, atr_len))
+    atr_now = float(atr(kl.reset_index(drop=True), atr_len))
     atr_pct = atr_now / float(price.iloc[-1]) if price.iloc[-1] > 0 else 0.0
     
     # Расчёт базового ATR (средний за большее окно для адаптации)
@@ -165,7 +205,7 @@ def compute_features(symbol: str, tf: str, lookback: int) -> Dict[str, Any]:
         atr_samples = []
         for i in range(max(0, len(kl) - 100), len(kl) - atr_len, 5):
             if i >= atr_len:
-                window_kl = kl.iloc[i-atr_len:i+atr_len]
+                window_kl = kl.reset_index(drop=True).iloc[i-atr_len:i+atr_len]
                 if len(window_kl) >= atr_len:
                     atr_sample = atr(window_kl, atr_len)
                     price_sample = float(window_kl["close"].iloc[-1])
@@ -223,25 +263,58 @@ def compute_features(symbol: str, tf: str, lookback: int) -> Dict[str, Any]:
         except (IndexError, ValueError, TypeError):
             return default
     
+    # BTC контекст по опорным ТФ режима (общий кэш, не качается заново на каждый символ)
+    btc_tfs = _btc_anchor_tfs(tf)
+    btc_data = btc_context(btc_tfs)
+    atr_btc = 0.0
+    btc_tf_kl = btc_data.get(tf)
+    if btc_tf_kl is None:
+        try:
+            btc_tf_kl = closed_klines("BTCUSDT", tf, limit=120)
+        except Exception:
+            btc_tf_kl = None
+    if btc_tf_kl is not None and len(btc_tf_kl) > atr_len:
+        btc_close = float(btc_tf_kl["close"].iloc[-1])
+        atr_btc = float(atr(btc_tf_kl.reset_index(drop=True), atr_len)) / btc_close if btc_close > 0 else 0.0
+
     feat: Dict[str, Any] = {
+        # ---- общие / v1 ----
         "price": price,
         "volume": vol,
         "oi": oi,
-        "funding": premium["funding"],
+        # funding приведён к 8ч, чтобы пороги значили одно и то же на парах с 1h/4h/8h
+        "funding": premium["funding_8h"],
+        "funding_raw": premium["funding"],
+        "funding_interval_h": premium["funding_interval_h"],
+        "funding_apr": premium["funding_apr"],
+        "next_funding_ms": premium["next_funding_ms"],
         "basis": premium["basis"],
+        "mark_price": premium["mark"],
         "taker_buy_share": safe_iloc_last(taker_share, default=0.5),
         "taker_buy_sell_ratio": safe_iloc_last(taker_ratio, default=1.0),
         "ls_top": safe_iloc_last(ls_top, default=1.0),
         "atr": atr_now,
         "atr_pct": atr_pct,
-        "atr_base": atr_base,  # средний ATR% за окно (для адаптивного фильтра)
+        "atr_base": atr_base,  # медианный ATR% за окно (для адаптивного фильтра)
         "price_now": safe_iloc_last(price, default=0.0),
         "price_prev": float(price.iloc[-2]) if len(price) >= 2 else safe_iloc_last(price, default=0.0),
         "volume_now": safe_iloc_last(vol, default=0.0),
         "volume_mean": safe_rolling_mean(vol, window=20, default=0.0),
         "oi_delta_pct": oi_delta_pct,
         "price_delta_pct": price_delta_pct,
-        "_debug_windows": {  # Для отладки (можно удалить в проде)
+        "delta_p_pct": price_delta_pct * 100.0,
+        "delta_oi_pct": oi_delta_pct * 100.0,
+        # ---- v2 ----
+        "ohlc": kl,                       # ASC, DatetimeIndex UTC, только закрытые бары
+        "oi_data": oi_df,                 # ASC: timestamp, open_interest, open_interest_value
+        "funding_24h_sign": f24["sign"],
+        "funding_24h_sum": f24["sum"],
+        "btc_data": btc_data,             # {tf: ASC ohlc}
+        "atr_btc": atr_btc,
+        "stats_period": period,
+        "bar_open_ms": int(kl["open_time"].iloc[-1]),
+        "bar_close_ms": last_close_ms,
+        "_debug_windows": {
             "tf_minutes": tf_minutes,
             "price_window_bars": price_window_bars,
             "oi_window_bars": oi_window_bars,
@@ -261,7 +334,7 @@ def btc_trend_filter(tf: str) -> Optional[str]:
     """
     from binance import ema
     
-    kl = binance_klines("BTCUSDT", tf, limit=200)
+    kl = closed_klines("BTCUSDT", tf, limit=200)
     if kl is None or len(kl) < 50:
         return None
     
