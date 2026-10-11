@@ -196,6 +196,10 @@ class StrategyPipeline:
         if not self._check_safety_gates(log):
             return log
         
+        # ========== 7.5 POSITIONING (правила v1: кто входит в рынок) ==========
+        if not self._check_positioning_gate(log, features, side):
+            return log
+        
         # ========== 8. TRIGGER DETECTION ==========
         trigger_type = self.trigger_manager.detect_trigger_type(
             impulse_data=impulse_data,
@@ -645,6 +649,31 @@ class StrategyPipeline:
             return False
         
         log.taker_pass = True
+        return True
+    
+    def _check_positioning_gate(self, log: SignalLog, features: Dict[str, Any], side: str) -> bool:
+        """Подтверждение позиционированием (ΔP/ΔOI/funding/basis/taker/LS) — см. strategy/positioning.py"""
+        from strategy.positioning import _get_positioning_analyzer
+        
+        analyzer = _get_positioning_analyzer()
+        res = analyzer.evaluate(features, side)
+        log.positioning_confirms = res.confirms
+        log.positioning_vetoes = res.vetoes
+        log.positioning_mode = analyzer.mode
+        
+        if not res.ok:
+            if res.vetoes:
+                log.add_ban_reason(BanReason.POSITIONING_VETO, ", ".join(res.vetoes))
+            else:
+                log.add_ban_reason(
+                    BanReason.POSITIONING_NO_CONFIRM,
+                    f"нет подтверждения {side}: ΔP={features.get('price_delta_pct', 0):+.2%} "
+                    f"ΔOI={features.get('oi_delta_pct', 0):+.2%} F={features.get('funding', 0):+.4%} "
+                    f"B={features.get('basis', 0):+.3%}"
+                )
+            return False
+        
+        log.positioning_pass = True
         return True
     
     def _check_safety_gates(self, log: SignalLog) -> bool:

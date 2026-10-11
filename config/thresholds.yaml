@@ -228,3 +228,17 @@ geometry:
 # Позиция
 position:
   be_offset_atr: 0.2        # BE = entry ± 0.2×ATR после TP1
+
+# Позиционирование (правила бывшей v1 как гейт-подтверждение, см. strategy/positioning.py)
+positioning:
+  mode: "require"           # require = нужно ≥1 подтверждение и нет вето; veto_only = только вето; off
+  basis_long_floor: -0.0010 # NEW_LONGS: basis не ниже
+  trap_oi_max: 0.001        # TRAP_UP: ΔOI ≤ 0.1% (рост без новых денег)
+  exhaust_taker_min: 0.60   # EXHAUST_UP: рыночные покупки ≥ 60% при ΔOI ≤ 0
+  only_short_ls: 2.5        # LS(top) > 2.5 и funding > 0 → только SHORT
+  only_long_ls: 0.7         # LS(top) < 0.7 и funding < 0 → только LONG
+  oi_spike_sigma: 2.0       # Всплеск OI ≥ 2σ без объёма → вето обеим сторонам
+  # Требуемая доля taker-покупок по сессиям (low 00–06, normal, high 13–20 UTC)
+  taker_required:
+    long:  {low: 0.52, normal: 0.53, high: 0.54}   # LONG: taker ≥
+    short: {low: 0.50, normal: 0.48, high: 0.50}   # SHORT: taker ≤

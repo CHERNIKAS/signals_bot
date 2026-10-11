@@ -47,6 +47,8 @@ class BanReason(Enum):
     COOLDOWN_ACTIVE = "COOLDOWN_ACTIVE"
     TP1_TOO_CLOSE = "TP1_TOO_CLOSE"
     RR_TOO_LOW = "RR_TOO_LOW"
+    POSITIONING_NO_CONFIRM = "POSITIONING_NO_CONFIRM"
+    POSITIONING_VETO = "POSITIONING_VETO"
 
 
 @dataclass
@@ -127,6 +129,12 @@ class SignalLog:
     taker_buy_share: float = 0.0
     taker_extreme_threshold: tuple = (0.0, 0.0)  # (long_gt, short_lt)
     taker_pass: bool = False
+    
+    # ========== POSITIONING GATE (правила v1) ==========
+    positioning_confirms: List[str] = field(default_factory=list)
+    positioning_vetoes: List[str] = field(default_factory=list)
+    positioning_mode: str = ""
+    positioning_pass: bool = False
     
     session_banned: bool = False
     news_blackout: bool = False
@@ -290,6 +298,12 @@ class SignalLog:
                 "ok": self.basis_pass,
                 "value": self.basis_now,
                 "reason": "" if self.basis_pass else "out_of_range"
+            },
+            "positioning": {
+                "ok": self.positioning_pass,
+                "confirms": self.positioning_confirms,
+                "vetoes": self.positioning_vetoes,
+                "mode": self.positioning_mode,
             },
             "btc": {
                 "ok": self.btc_wind_pass,

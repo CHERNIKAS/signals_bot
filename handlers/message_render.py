@@ -259,7 +259,7 @@ def _render_gates(log: SignalLog) -> str:
     short_case = oi.get('short_case', '')
     short_case_text = f", case {short_case}" if short_case else ""
     oi_text = (
-        f"flow {oi.get('flow', 0):+.2f}%, "
+        f"flow {oi.get('flow', 0):+.2%}, "
         f"perc {oi.get('percentile', 0)}, "
         f"mag {oi.get('mag_gate', 0):.1f}{short_case_text}"
     )
@@ -289,7 +289,16 @@ def _render_gates(log: SignalLog) -> str:
         f"• Funding/Basis … {fb_status} ({fb_text})    "
         f"• BTC wind … {btc_status} ({btc_text})"
     )
-    
+
+    # Строка 4: Positioning (правила v1)
+    pos = gates.get('positioning')
+    if pos and pos.get('mode') and pos.get('mode') != "off":
+        pos_status = "✅" if pos.get('ok') else "❌"
+        pos_text = ", ".join(pos.get('confirms') or []) or "—"
+        if pos.get('vetoes'):
+            pos_text += " | вето: " + ", ".join(pos['vetoes'])
+        lines.append(f"• Positioning … {pos_status} ({pos_text})")
+
     return "\n".join(lines)
 
 
