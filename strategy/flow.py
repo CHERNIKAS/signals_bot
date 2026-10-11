@@ -63,8 +63,8 @@ class OIFlowAnalyzer:
         Вычисляет OI Flow метрики
         
         Args:
-            oi_data: DataFrame с колонками ['timestamp', 'open_interest']
-                     Должен быть отсортирован по timestamp DESC (новые первые)
+            oi_data: DataFrame с колонкой 'open_interest' (market.open_interest_hist)
+                     Отсортирован по timestamp ASC (старые → новые)
             n_bars: Размер окна для OI_Flow (по умолчанию 20)
             pathscore: PathScore для детекции short-кейсов
         
@@ -72,74 +72,45 @@ class OIFlowAnalyzer:
             OIFlowMetrics со всеми метриками
         """
         if oi_data is None or len(oi_data) < n_bars + 1:
-            # Недостаточно данных
             return self._empty_metrics(n_bars)
-        
-        # Берём последние n_bars + история
+
         history_mult = self.config['history_mult']
         history_bars = max(30, history_mult * n_bars)
-        
-        # Ограничиваем до доступного количества
-        total_needed = n_bars + history_bars
-        if len(oi_data) < total_needed:
-            history_bars = len(oi_data) - n_bars
-            if history_bars < n_bars:
-                return self._empty_metrics(n_bars)
-        
-        # Извлекаем OI значения (новые первые)
-        oi_values = oi_data['open_interest'].values[:total_needed]
-        
-        # Вычисляем ΔOI
-        doi = np.diff(oi_values)  # doi[i] = oi[i] - oi[i+1] (изменение)
-        doi = -doi  # Инвертируем, чтобы рост OI был положительным
-        
-        # Окно N (последние n_bars изменений)
-        doi_window = doi[:n_bars]
-        
-        # История для перцентилей
-        doi_history = doi[:history_bars]
-        
-        # 1. OI_Flow = Σ(ΔOI_positive) - |Σ(ΔOI_negative)|
-        doi_pos = doi_window[doi_window > 0].sum()
-        doi_neg = abs(doi_window[doi_window < 0].sum())
-        oi_flow = doi_pos - doi_neg
-        
-        # 2. Перцентиль p_flow
-        # Вычисляем OI_Flow для каждого окна в истории (скользящее окно)
+
+        # ASC: старые → новые. Хвост: история + текущее окно (+1 точка для diff)
+        oi_values = oi_data['open_interest'].values.astype(float)
+        oi_values = oi_values[-(history_bars + n_bars + 1):]
+        doi = np.diff(oi_values)  # рост OI → положительный ΔOI
+        if len(doi) < 2 * n_bars:
+            return self._empty_metrics(n_bars)
+
+        doi_window = doi[-n_bars:]
+        doi_history = doi[:-n_bars]  # история БЕЗ текущего окна
+
+        # 1. OI_Flow — чистое изменение OI за окно в долях от уровня OI,
+        #    чтобы значения были сопоставимы между монетами
+        oi_level = float(np.median(oi_values)) or 1.0
+        oi_flow = float(doi_window.sum()) / oi_level
+
+        # 2. Перцентиль p_flow среди скользящих окон истории
         if len(doi_history) >= n_bars:
-            flow_history = []
-            for i in range(len(doi_history) - n_bars + 1):
-                window = doi_history[i:i+n_bars]
-                pos = window[window > 0].sum()
-                neg = abs(window[window < 0].sum())
-                flow_history.append(pos - neg)
-            
-            flow_history = np.array(flow_history)
-            percentile = np.searchsorted(np.sort(flow_history), oi_flow) / len(flow_history) * 100
+            sums = np.convolve(doi_history, np.ones(n_bars), mode="valid") / oi_level
+            percentile = float((sums < oi_flow).mean() * 100.0)
         else:
-            percentile = 50.0  # Дефолт, если не хватает истории
-        
-        # 3. Magnitude Gate: |OI_Flow| / median(|ΔOI|)
-        median_abs_doi = np.median(np.abs(doi_window))
-        if median_abs_doi > 0:
-            mag_gate = abs(oi_flow) / median_abs_doi
-        else:
-            mag_gate = 0.0
-        
-        # 4. Аномалия: Z-score последнего ΔOI
+            percentile = 50.0
+
+        # 3. Magnitude gate: |Flow| / median(|ΔOI|) истории — во сколько "типичных шагов" поток
+        median_abs_doi = float(np.median(np.abs(doi_history))) if len(doi_history) else 0.0
+        mag_gate = abs(float(doi_window.sum())) / median_abs_doi if median_abs_doi > 0 else 0.0
+
+        # 4. Аномалия: z-score последнего ΔOI относительно истории
         if len(doi_history) > 1:
-            mean_doi = np.mean(doi_history)
-            std_doi = np.std(doi_history)
-            
-            if std_doi > 0:
-                doi_sigma = abs((doi[0] - mean_doi) / std_doi)
-            else:
-                doi_sigma = 0.0
+            mean_doi = float(np.mean(doi_history))
+            std_doi = float(np.std(doi_history))
+            doi_sigma = abs((doi[-1] - mean_doi) / std_doi) if std_doi > 0 else 0.0
         else:
-            mean_doi = 0.0
-            std_doi = 0.0
-            doi_sigma = 0.0
-        
+            mean_doi = std_doi = doi_sigma = 0.0
+
         # 5. Short-кейсы (дивергенции)
         is_short_case = False
         short_case_type = None
@@ -208,7 +179,7 @@ class OIFlowAnalyzer:
         if side == "LONG":
             # LONG требует положительный flow
             if metrics.oi_flow <= 0:
-                return False, f"OI_Flow={metrics.oi_flow:.2f} ≤ 0 for LONG"
+                return False, f"OI_Flow={metrics.oi_flow:+.3%} ≤ 0 for LONG"
             
             if metrics.percentile < percentile_threshold:
                 return False, f"p_flow={metrics.percentile:.0f}% < {percentile_threshold}%"
@@ -219,7 +190,7 @@ class OIFlowAnalyzer:
         else:  # SHORT
             # SHORT требует отрицательный flow (если не short-case)
             if metrics.oi_flow >= 0 and not metrics.is_short_case:
-                return False, f"OI_Flow={metrics.oi_flow:.2f} ≥ 0 for SHORT"
+                return False, f"OI_Flow={metrics.oi_flow:+.3%} ≥ 0 for SHORT"
             
             # Для SHORT перцентиль инвертирован
             inv_percentile = 100 - metrics.percentile

@@ -148,7 +148,7 @@ class LevelDetector:
         
         # Детекция Swing Highs
         for i in range(k, len(highs) - k):
-            left_max = highs[i-k:i].max() if i > k else 0
+            left_max = highs[i-k:i].max()
             right_max = highs[i+1:i+k+1].max()
             
             if highs[i] > left_max and highs[i] > right_max:
@@ -174,7 +174,7 @@ class LevelDetector:
         
         # Детекция Swing Lows
         for i in range(k, len(lows) - k):
-            left_min = lows[i-k:i].min() if i > k else float('inf')
+            left_min = lows[i-k:i].min()
             right_min = lows[i+1:i+k+1].min()
             
             if lows[i] < left_min and lows[i] < right_min:

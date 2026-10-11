@@ -234,6 +234,15 @@ class SignalLog:
         self.status = SignalStatus.BANNED
         print(f"[BAN] {self.symbol} {self.timeframe} {self.side}: {reason.value} - {details}")
     
+    @property
+    def rr_tp1(self) -> float:
+        """Алиас: RR до TP1 (исторически поле называется rr_to_sl)."""
+        return self.rr_to_sl
+
+    @property
+    def rr_tp2(self) -> float:
+        return self.rr_to_tp2
+
     def mark_passed(self):
         """Помечает сигнал как прошедший все гейты"""
         if self.status == SignalStatus.PENDING:

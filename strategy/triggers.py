@@ -108,26 +108,26 @@ class TriggerManager:
         pathscore = impulse_data.get('pathscore', 0)
         oi_flow = flow_data.get('oi_flow', 0)
         
-        nearest_level = levels_data.get('nearest_counter_level')
-        level_type = levels_data.get('level_type', '')
+        # Опорный уровень ЗА спиной сделки (поддержка для LONG / сопротивление для SHORT)
+        support_type = levels_data.get('support_type', '')
+        support_dist_atr = levels_data.get('support_dist_atr', 999.0)
+        near_support = support_dist_atr <= 0.6
         
-        # EPS: PathScore↑ & OI_Flow ≤ 0
+        # EPS: PathScore↑ & OI_Flow ≤ 0 — рост без новых позиций (шорт-кейс)
         if pathscore > 0.85 and oi_flow <= 0:
             return TriggerType.EPS
         
-        # LQS: PathScore↓ & OI_Flow > 0
+        # LQS: PathScore↓ & OI_Flow > 0 — падение с набором позиций
         if pathscore < -0.85 and oi_flow > 0:
             return TriggerType.LQS
         
-        # FVR: уровень типа "FVG"
-        if level_type == "FVG":
+        # FVR: вход у FVG за спиной
+        if near_support and support_type == "FVG":
             return TriggerType.FVR
         
-        # BR/LSR: проверка retest vs первое касание
-        # (упрощённо - нужна история касаний уровня)
-        if nearest_level:
-            # TODO: добавить проверку истории касаний
-            # Пока всё как LSR
+        # LSR: вход у уровня за спиной (отскок/удержание)
+        # BR (ретест пробитого уровня) требует истории касаний — пока не детектируется
+        if near_support:
             return TriggerType.LSR
         
         # Дефолт: TC

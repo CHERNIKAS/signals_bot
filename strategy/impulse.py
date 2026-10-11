@@ -70,7 +70,7 @@ class ImpulseAnalyzer:
         
         Args:
             ohlc: DataFrame с колонками ['open', 'high', 'low', 'close']
-                  Должен быть отсортирован по времени DESC (новые первые)
+                  Отсортирован по времени ASC (старые → новые), как отдаёт market.closed_klines
             timeframe: Текущий таймфрейм
             atr: ATR значение
         
@@ -88,110 +88,56 @@ class ImpulseAnalyzer:
         # Проверяем достаточность данных
         if len(ohlc) < n_bars + 1:
             return self._empty_metrics(n_bars)
-        
-        # Берём окно (последние n_bars + текущий бар)
-        window = ohlc.iloc[:n_bars+1].copy()
-        
-        # 2. PathScore = |Close_now - Close_N| / Σ(TrueRange)
-        close_now = window['close'].iloc[0]
-        close_n = window['close'].iloc[-1]
+
+        # Окно: последние n_bars + 1 баров, ASC (старые → новые)
+        window = ohlc.iloc[-(n_bars + 1):]
+        opens = window['open'].values.astype(float)
+        highs = window['high'].values.astype(float)
+        lows = window['low'].values.astype(float)
+        closes = window['close'].values.astype(float)
+
+        # 2. PathScore = (Close_now - Close_N) / Σ(TrueRange) — Kaufman efficiency ratio со знаком
+        close_now = closes[-1]
+        close_n = closes[0]
         price_change = abs(close_now - close_n)
-        
-        # True Range = max(high - low, |high - prev_close|, |low - prev_close|)
-        highs = window['high'].values
-        lows = window['low'].values
-        closes = window['close'].values
-        
-        true_ranges = []
-        for i in range(len(window)):
-            if i == len(window) - 1:
-                # Последний бар - просто high - low
-                tr = highs[i] - lows[i]
-            else:
-                prev_close = closes[i+1]
-                tr = max(
-                    highs[i] - lows[i],
-                    abs(highs[i] - prev_close),
-                    abs(lows[i] - prev_close)
-                )
-            true_ranges.append(tr)
-        
-        true_range_sum = sum(true_ranges)
-        
-        if true_range_sum > 0:
-            pathscore = price_change / true_range_sum
-        else:
-            pathscore = 0.0
-        
-        # Определяем знак (направление импульса)
-        if close_now > close_n:
-            # Бычий импульс
-            pathscore = pathscore
-        else:
-            # Медвежий импульс
+
+        prev_closes = closes[:-1]
+        h, l = highs[1:], lows[1:]
+        tr = np.maximum(h - l, np.maximum(np.abs(h - prev_closes), np.abs(l - prev_closes)))
+        # Первый бар окна — точка отсчёта (Close_N), его TR в путь не входит
+        true_range_sum = float(tr.sum())
+
+        pathscore = price_change / true_range_sum if true_range_sum > 0 else 0.0
+        if close_now < close_n:
             pathscore = -pathscore
-        
-        # 3. Anti-chop: максимальный откат внутри окна
-        # Для бычьего импульса: макс падение от пика
-        # Для медвежьего: макс рост от дна
-        
-        if pathscore > 0:  # Бычий
-            # Находим максимум и минимум после него
-            max_retracement = 0.0
-            running_high = highs[0]
-            
-            for i in range(len(highs)):
-                running_high = max(running_high, highs[i])
-                retracement = running_high - lows[i]
-                max_retracement = max(max_retracement, retracement)
-        
-        else:  # Медвежий
-            # Находим минимум и максимум после него
-            max_retracement = 0.0
-            running_low = lows[0]
-            
-            for i in range(len(lows)):
-                running_low = min(running_low, lows[i])
-                retracement = highs[i] - running_low
-                max_retracement = max(max_retracement, retracement)
-        
-        anti_chop_atr = max_retracement / atr if atr > 0 else 0.0
-        
-        # 4. Монотоничность
-        opens = window['open'].values
-        closes = window['close'].values
-        
-        bullish_bodies = 0
-        bearish_bodies = 0
-        total_body_size = 0.0
-        total_wick_size = 0.0
-        
-        for i in range(len(window)):
-            body = abs(closes[i] - opens[i])
-            upper_wick = highs[i] - max(opens[i], closes[i])
-            lower_wick = min(opens[i], closes[i]) - lows[i]
-            total_wick = upper_wick + lower_wick
-            
-            total_body_size += body
-            total_wick_size += total_wick
-            
-            if closes[i] > opens[i]:
-                bullish_bodies += 1
-            elif closes[i] < opens[i]:
-                bearish_bodies += 1
-        
-        # body_share: доля направленных баров
-        if pathscore > 0:  # Бычий импульс
-            body_share = bullish_bodies / len(window) if len(window) > 0 else 0.0
-        else:  # Медвежий импульс
-            body_share = bearish_bodies / len(window) if len(window) > 0 else 0.0
-        
-        # body_ratio: тела / тени
-        if total_wick_size > 0:
-            body_ratio = total_body_size / total_wick_size
+
+        # 3. Anti-chop: максимальный откат против направления импульса (в хронологическом порядке)
+        if pathscore >= 0:
+            running_high = np.maximum.accumulate(h)
+            max_retracement = float(np.max(running_high - l))
         else:
-            body_ratio = total_body_size / 1e-6  # Избегаем деления на 0
-        
+            running_low = np.minimum.accumulate(l)
+            max_retracement = float(np.max(h - running_low))
+
+        anti_chop_atr = max_retracement / atr if atr > 0 else 0.0
+
+        # 4. Монотоничность (по барам импульса, без опорного бара)
+        o, c = opens[1:], closes[1:]
+        bodies = np.abs(c - o)
+        wicks = (h - np.maximum(o, c)) + (np.minimum(o, c) - l)
+        total_body_size = float(bodies.sum())
+        total_wick_size = float(wicks.sum())
+        bullish_bodies = int((c > o).sum())
+        bearish_bodies = int((c < o).sum())
+        n_imp = len(c)
+
+        if pathscore >= 0:
+            body_share = bullish_bodies / n_imp if n_imp else 0.0
+        else:
+            body_share = bearish_bodies / n_imp if n_imp else 0.0
+
+        body_ratio = total_body_size / total_wick_size if total_wick_size > 0 else 99.0
+
         return ImpulseMetrics(
             n_bars=n_bars,
             pathscore=pathscore,

@@ -62,7 +62,7 @@ class BTCWindAnalyzer:
         Args:
             btc_data: Словарь {timeframe: ohlc_df}
                      Каждый ohlc_df должен иметь ['open', 'high', 'low', 'close']
-                     отсортированный по времени DESC (новые первые)
+                     отсортированный по времени ASC (старые → новые)
             mode: "scalp", "intraday", "swing"
             current_btc_atr_pct: Текущая волатильность BTC (для lock mult)
         
@@ -149,66 +149,55 @@ class BTCWindAnalyzer:
         Вычисляет направление тренда на таймфрейме
         
         Используем простую логику:
-        - Сравниваем текущую цену с MA(lookback)
-        - Strength = |price - MA| / MA
+        - Сравниваем текущую цену с MA(lookback), отклонение меряем в ATR
+        - |diff| > 0.5 ATR → направление, strength = |diff| / 2 ATR (clamp 1)
         
         Returns:
             (direction, strength) где direction = +1/-1/0, strength = 0-1
         """
-        if len(ohlc) < lookback:
+        if len(ohlc) < lookback + 1:
             return 0, 0.0
-        
-        closes = ohlc['close'].iloc[:lookback].values
-        current_price = closes[0]
-        ma = np.mean(closes)
-        
-        diff_pct = (current_price - ma) / ma
-        strength = min(abs(diff_pct) / 0.02, 1.0)  # Нормализуем до 1 при 2% отклонении
-        
-        if diff_pct > 0.005:  # > 0.5%
+
+        # ASC: последний бар — самый свежий
+        closes = ohlc['close'].values[-lookback:].astype(float)
+        current_price = closes[-1]
+        ma = float(np.mean(closes))
+        atr_abs = self._calculate_atr_pct(ohlc) * current_price
+        if atr_abs <= 0 or ma <= 0:
+            return 0, 0.0
+
+        # Отклонение от MA в ATR: порог одинаково работает на 1m и на 1d
+        diff_atr = (current_price - ma) / atr_abs
+        strength = min(abs(diff_atr) / 2.0, 1.0)
+
+        if diff_atr > 0.5:
             direction = +1
-        elif diff_pct < -0.005:  # < -0.5%
+        elif diff_atr < -0.5:
             direction = -1
         else:
             direction = 0
             strength = 0.0
-        
+
         return direction, strength
-    
+
     def _calculate_atr_pct(
         self,
         ohlc: pd.DataFrame,
         period: int = 14
     ) -> float:
-        """
-        Вычисляет ATR% для таймфрейма
-        
-        Returns:
-            ATR / Close (в процентах)
-        """
+        """ATR / Close по последним `period` закрытым барам (ASC)."""
         if len(ohlc) < period + 1:
-            return 0.01  # Дефолтная волатильность 1%
-        
-        highs = ohlc['high'].iloc[:period+1].values
-        lows = ohlc['low'].iloc[:period+1].values
-        closes = ohlc['close'].iloc[:period+1].values
-        
-        true_ranges = []
-        for i in range(period):
-            tr = max(
-                highs[i] - lows[i],
-                abs(highs[i] - closes[i+1]) if i < period else 0,
-                abs(lows[i] - closes[i+1]) if i < period else 0
-            )
-            true_ranges.append(tr)
-        
-        atr = np.mean(true_ranges)
-        current_price = closes[0]
-        
-        atr_pct = atr / current_price if current_price > 0 else 0.01
-        
-        return atr_pct
-    
+            return 0.01
+
+        tail = ohlc.iloc[-(period + 1):]
+        highs = tail['high'].values.astype(float)
+        lows = tail['low'].values.astype(float)
+        closes = tail['close'].values.astype(float)
+        prev = closes[:-1]
+        tr = np.maximum(highs[1:] - lows[1:], np.maximum(np.abs(highs[1:] - prev), np.abs(lows[1:] - prev)))
+        current_price = closes[-1]
+        return float(tr.mean()) / current_price if current_price > 0 else 0.01
+
     def _neutral_wind(self, base_lock_minutes: int) -> BTCWindMetrics:
         """Возвращает нейтральный ветер (нет данных)"""
         return BTCWindMetrics(

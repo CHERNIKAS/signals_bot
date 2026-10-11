@@ -127,7 +127,7 @@ class StrategyPipeline:
         atr_pct = features.get("atr_pct", 0)
         
         # ========== 1. ATR GATE ==========
-        if not self._check_atr_gate(log, atr, atr_pct, mode_name):
+        if not self._check_atr_gate(log, atr, atr_pct, mode_name, features.get("ohlc")):
             return log
         
         # ========== 2. IMPULSE GATE ==========
@@ -139,6 +139,12 @@ class StrategyPipeline:
             atr=atr
         )
         if not self._check_impulse_gate(log, impulse_data, mode_name):
+            return log
+
+        # LONG только по бычьему импульсу. SHORT — по медвежьему, либо по бычьему,
+        # если ниже OI-гейт распознает EPS (рост без новых позиций)
+        if side == "LONG" and log.pathscore <= 0:
+            log.add_ban_reason(BanReason.IMPULSE_LOW_PATHSCORE, f"PathScore={log.pathscore:+.2f}: импульс против LONG")
             return log
         
         # ========== 3. SPACE/LEVELS GATE ==========
@@ -161,9 +167,14 @@ class StrategyPipeline:
         )
         if not self._check_oi_flow_gate(log, flow_data, side, impulse_data, mode_name):
             return log
+
+        if side == "SHORT" and log.pathscore > 0 and flow_data.get("short_case_type") != "EPS":
+            log.add_ban_reason(BanReason.IMPULSE_LOW_PATHSCORE, f"PathScore={log.pathscore:+.2f}: импульс против SHORT (не EPS)")
+            return log
         
         # ========== 5. FUNDING/BASIS GATE ==========
-        if not self._check_funding_gate(log, features.get("funding", 0), features.get("funding_24h_sign", 0), side):
+        if not self._check_funding_gate(log, features.get("funding", 0), features.get("funding_24h_sign", 0), side,
+                                        features.get("funding_interval_h", 8)):
             return log
         
         if not self._check_basis_gate(log, features.get("basis", 0), side):
@@ -230,31 +241,48 @@ class StrategyPipeline:
     
     # ========== GATE METHODS (заглушки, нужно реализовать) ==========
     
-    def _check_atr_gate(self, log: SignalLog, atr: float, atr_pct: float, mode_name: str) -> bool:
-        """Проверка ATR в квантилях режима"""
+    def _check_atr_gate(self, log: SignalLog, atr: float, atr_pct: float, mode_name: str, ohlc=None) -> bool:
+        """ATR% должен лежать между квантилями собственной истории монеты (по закрытым барам).
+
+        Раньше квантили [0.30, 0.70] сравнивались с atr_pct напрямую (т.е. требовался ATR 30–70%
+        от цены) — гейт банил вообще всё.
+        """
+        import numpy as np
         log.atr = atr
         log.atr_pct = atr_pct
-        
-        # Получаем квантили из конфига
-        quantiles = self.config['atr_pct_quantiles'][mode_name]
-        log.atr_quantile_range = tuple(quantiles)
-        
-        # TODO (опционально): для точных квантилей нужна история per-TF из БД
-        # Сейчас используем статические пределы из YAML как fallback
-        q_low, q_high = quantiles
-        
-        # Проверяем диапазон
-        if atr_pct < q_low:
-            log.add_ban_reason(BanReason.ATR_OUT_OF_RANGE, f"atr_pct={atr_pct:.4f} < Q{int(q_low*100)}={q_low:.4f}")
+
+        q_low, q_high = self.config['atr_pct_quantiles'][mode_name]
+        log.atr_quantile_range = (q_low, q_high)
+
+        if atr <= 0 or atr_pct <= 0:
+            log.add_ban_reason(BanReason.ATR_OUT_OF_RANGE, "ATR=0 (нет данных)")
             return False
-        
-        if atr_pct > q_high:
-            log.add_ban_reason(BanReason.ATR_OUT_OF_RANGE, f"atr_pct={atr_pct:.4f} > Q{int(q_high*100)}={q_high:.4f}")
+
+        if ohlc is None or len(ohlc) < 60:
+            log.add_ban_reason(BanReason.ATR_OUT_OF_RANGE, "мало истории для квантилей ATR")
             return False
-        
+
+        high, low, close = ohlc['high'], ohlc['low'], ohlc['close']
+        prev = close.shift(1)
+        tr = np.maximum(high - low, np.maximum((high - prev).abs(), (low - prev).abs()))
+        atr_hist = (tr.rolling(14).mean() / close).dropna().tail(200)
+        if len(atr_hist) < 30:
+            log.add_ban_reason(BanReason.ATR_OUT_OF_RANGE, "мало истории для квантилей ATR")
+            return False
+
+        rank = float((atr_hist < atr_pct).mean())
+        lo_v, hi_v = float(atr_hist.quantile(q_low)), float(atr_hist.quantile(q_high))
+
+        if rank < q_low:
+            log.add_ban_reason(BanReason.ATR_OUT_OF_RANGE, f"atr%={atr_pct:.3%} < Q{int(q_low*100)}={lo_v:.3%} (ранг {rank:.0%})")
+            return False
+        if rank > q_high:
+            log.add_ban_reason(BanReason.ATR_OUT_OF_RANGE, f"atr%={atr_pct:.3%} > Q{int(q_high*100)}={hi_v:.3%} (ранг {rank:.0%})")
+            return False
+
         log.atr_pass = True
         return True
-    
+
     def _calculate_impulse(self, ohlc, timeframe: str, side: str, mode_name: str, atr: float = 0) -> Dict[str, Any]:
         """Вычисляет импульсные метрики"""
         from strategy.impulse import _get_impulse_analyzer
@@ -346,13 +374,13 @@ class StrategyPipeline:
             
             # Ранжируем
             if current_time is None:
-                current_time = pd.Timestamp.utcnow()
+                current_time = ohlc.index[-1] if isinstance(ohlc.index, pd.DatetimeIndex) else pd.Timestamp.now(tz="UTC")
             
             ranked = detector.rank_levels(
                 levels=clustered,
-                current_price=price_now if price_now > 0 else ohlc['close'].iloc[0],
+                current_price=price_now if price_now > 0 else ohlc['close'].iloc[-1],
                 current_time=current_time,
-                top_k=12
+                top_k=self.config['levels']['top_k']
             )
         else:
             ranked = precomputed_levels
@@ -381,7 +409,15 @@ class StrategyPipeline:
                 side=side
             )
             
+            support = detector.find_counter_level(levels, price_now, "SHORT" if side == "LONG" else "LONG")
+            if support:
+                levels_data["support_level"] = support.price
+                levels_data["support_type"] = support.level_type.value
+                levels_data["support_dist_atr"] = abs(price_now - support.price) / atr if atr > 0 else 999.0
+
             if counter_level:
+                levels_data["nearest_counter_level"] = counter_level.price
+                levels_data["level_type"] = counter_level.level_type.value
                 log.nearest_counter_level = counter_level.price
                 log.level_type = counter_level.level_type.value
                 log.level_timeframe = counter_level.timeframe
@@ -497,19 +533,29 @@ class StrategyPipeline:
         log.oi_flow_pass = True
         return True
     
-    def _check_funding_gate(self, log: SignalLog, funding_now: float, funding_24h_sign: int, side: str) -> bool:
-        """Проверка Funding"""
+    def _check_funding_gate(self, log: SignalLog, funding_now: float, funding_24h_sign: int, side: str,
+                            funding_interval_h: int = 8) -> bool:
+        """Funding (уже приведён к 8ч в market.premium_snapshot).
+
+        - |funding_8h| > now_abs_max → перегрев, бан
+        - пара на часовом начислении = funding упёрся в кап; не входим в сторону толпы
+        """
         log.funding_now = funding_now
         log.funding_24h_sign = funding_24h_sign
         log.funding_now_threshold = self.config['funding']['now_abs_max']
-        
+
         if abs(funding_now) > log.funding_now_threshold:
-            log.add_ban_reason(BanReason.FUNDING_EXTREME, f"Funding={funding_now:.4%}")
+            log.add_ban_reason(BanReason.FUNDING_EXTREME, f"Funding(8h)={funding_now:+.4%}")
             return False
-        
+
+        if funding_interval_h == 1:
+            if (side == "LONG" and funding_now > 0) or (side == "SHORT" and funding_now < 0):
+                log.add_ban_reason(BanReason.FUNDING_AGAINST, f"интервал 1h, Funding(8h)={funding_now:+.4%} — толпа уже в {side}")
+                return False
+
         log.funding_pass = True
         return True
-    
+
     def _check_basis_gate(self, log: SignalLog, basis_now: float, side: str) -> bool:
         """Проверка Basis"""
         log.basis_now = basis_now
@@ -648,53 +694,56 @@ class StrategyPipeline:
             "tp2_mult_add": adjustments.tp2_mult_add_atr_pct
         }
         
-        # ========== STRUCTURAL SL ==========
-        # Ищем ближайший уровень для SL (противоположное направление)
+        geo = self.config.get('geometry', {})
+        side_sign = 1.0 if log.side == "LONG" else -1.0
+
+        # ========== SL: за опорным уровнем, но не ближе волатильного минимума ==========
         sl_side = "SHORT" if log.side == "LONG" else "LONG"
         structural_level = detector.find_counter_level(levels, entry_price, sl_side)
-        
+        total_buffer = mode_config.sl_buffer_atr + adjustments.sl_buffer_add_atr
+        log.sl_buffer_atr = total_buffer
+        k_min = mode_config.sl_min_mult_atr_pct[0] + adjustments.sl_min_add_atr_pct
+
         if structural_level:
-            # Заполняем anchor поля для карточки
             log.sl_anchor_type = adjustments.sl_anchor if adjustments.sl_anchor else structural_level.level_type.value
             log.sl_anchor_tf = structural_level.timeframe
             log.sl_anchor_price = structural_level.price
-            
-            # Применяем буфер + поправки триггера
-            total_buffer = mode_config.sl_buffer_atr + adjustments.sl_buffer_add_atr
-            log.sl_buffer_atr = total_buffer
-            
             sl_candidate = self.mode_manager.calculate_sl_from_structure(
                 entry_price=entry_price,
                 structural_level=structural_level.price,
                 side=log.side,
                 atr=atr,
                 atr_pct=atr_pct,
-                mode=mode_config
+                mode=mode_config,
+                buffer_atr=total_buffer,
+                min_mult_add=adjustments.sl_min_add_atr_pct
             )
         else:
-            # Нет структурного уровня - используем минимум от ATR
             log.sl_anchor_type = "atr_min"
             log.sl_anchor_tf = log.timeframe
             log.sl_anchor_price = None
-            sl_mult = mode_config.sl_min_mult_atr_pct[0]
-            sl_candidate = entry_price * (1 - sl_mult * atr_pct) if log.side == "LONG" else entry_price * (1 + sl_mult * atr_pct)
-        
+            sl_candidate = entry_price * (1 - side_sign * k_min * atr_pct)
+
         log.sl_final = sl_candidate
-        log.sl_vola_floor_atr_pct = mode_config.sl_min_mult_atr_pct[0] * atr_pct
-        
-        # ========== TP1 ==========
-        # Ищем встречный уровень для TP1
+        log.sl_vola_floor_atr_pct = k_min * atr_pct
+        sl_dist = abs(entry_price - log.sl_final)
+
+        # ========== TP1: перед встречным уровнем, иначе RR-бэкап от стопа ==========
         counter_level = detector.find_counter_level(levels, entry_price, log.side)
-        
-        if counter_level:
-            # Заполняем anchor поля
+
+        tp1_max_atr = float(geo.get('tp1_max_atr', 3.0))
+        if counter_level and abs(counter_level.price - entry_price) > (tp1_max_atr + mode_config.tp1_offset_atr[0]) * atr:
+            # Уровень слишком далеко для горизонта удержания — цель по ATR, уровень остаётся ориентиром TP2
+            log.tp1_anchor_type = "atr_cap"
+            log.tp1_anchor_tf = log.timeframe
+            log.tp1_anchor_price = None
+            log.tp1_offset_atr = 0.0
+            log.tp1_final = entry_price + side_sign * tp1_max_atr * atr
+        elif counter_level:
             log.tp1_anchor_type = counter_level.level_type.value
             log.tp1_anchor_tf = counter_level.timeframe
             log.tp1_anchor_price = counter_level.price
-            
-            tp1_offset = mode_config.tp1_offset_atr[0] + adjustments.tp1_add_atr_pct * atr_pct * entry_price
-            log.tp1_offset_atr = tp1_offset / atr if atr > 0 else 0
-            
+            log.tp1_offset_atr = mode_config.tp1_offset_atr[0]
             log.tp1_final = self.mode_manager.calculate_tp1_from_level(
                 counter_level=counter_level.price,
                 side=log.side,
@@ -702,40 +751,44 @@ class StrategyPipeline:
                 mode=mode_config
             )
         else:
-            # Нет уровня - используем RR-бэкап
+            # Встречного уровня нет — открытое пространство. Цель от размера стопа.
+            # (Раньше тут было entry ± 0.10×ATR — такой TP всегда банился как TOO_CLOSE.)
+            rr_backup = float(geo.get('tp1_rr_backup', 1.5))
             log.tp1_anchor_type = "rr_backup"
             log.tp1_anchor_tf = log.timeframe
             log.tp1_anchor_price = None
-            tp1_mult = mode_config.tp1_offset_atr[0]
-            log.tp1_offset_atr = tp1_mult
-            log.tp1_final = entry_price * (1 + tp1_mult * atr_pct) if log.side == "LONG" else entry_price * (1 - tp1_mult * atr_pct)
-        
-        # ========== TP2 ==========
-        # Ищем следующий уровень или используем RR-бэкап
-        # (упрощённо - используем RR)
+            log.tp1_offset_atr = 0.0
+            log.tp1_final = entry_price + side_sign * min(sl_dist * rr_backup, tp1_max_atr * atr)
+
+        # ========== TP2: RR-бэкап по ATR, но всегда дальше TP1 ==========
         log.tp2_anchor_type = "rr_backup"
         log.tp2_anchor_tf = log.timeframe
         log.tp2_anchor_price = None
-        
         tp2_mult = mode_config.tp2_mult_atr_pct[0] + adjustments.tp2_mult_add_atr_pct
         log.tp2_rr_backup_mult_atr_pct = tp2_mult
-        log.tp2_offset_atr = 0.0  # Для RR-бэкапа offset не применяется
-        
-        log.tp2_final = self.mode_manager.calculate_tp2_backup(
+        log.tp2_offset_atr = 0.0
+        tp2 = self.mode_manager.calculate_tp2_backup(
             entry_price=entry_price,
             side=log.side,
             atr_pct=atr_pct,
-            mode=mode_config
+            mode=mode_config,
+            mult_add=adjustments.tp2_mult_add_atr_pct
         )
-        
-        # ========== RR ==========
-        if log.sl_final != entry_price:
-            log.rr_to_sl = abs((log.tp1_final - entry_price) / (entry_price - log.sl_final))  # RR к SL (через TP1)
-            log.rr_to_tp2 = abs((log.tp2_final - entry_price) / (entry_price - log.sl_final))  # RR к TP2
+        min_tp2 = log.tp1_final + side_sign * 0.5 * atr
+        log.tp2_final = max(tp2, min_tp2) if log.side == "LONG" else min(tp2, min_tp2)
+
+        # ========== RR (gross и net с учётом комиссий) ==========
+        fee = 2.0 * float(self.config.get('fees', {}).get('taker', 0.0005)) * entry_price
+        tp1_dist = abs(log.tp1_final - entry_price)
+        tp2_dist = abs(log.tp2_final - entry_price)
+        if sl_dist > 0:
+            log.rr_to_sl = tp1_dist / sl_dist
+            log.rr_to_tp2 = tp2_dist / sl_dist
+            log._rr_tp1_net = (tp1_dist - fee) / (sl_dist + fee)
         else:
-            log.rr_to_sl = 0.0
-            log.rr_to_tp2 = 0.0
-        
+            log.rr_to_sl = log.rr_to_tp2 = 0.0
+            log._rr_tp1_net = 0.0
+
         # ========== BE/Trail (из конфига) ==========
         log.be_offset_atr = self.config.get('position', {}).get('be_offset_atr', 0.2)
         log.trail_atr = mode_config.sl_buffer_atr + adjustments.trail_add_atr
@@ -762,32 +815,41 @@ class StrategyPipeline:
         log._tp2_move = {"pct": round(tp2_pct, 2), "atr_mult": round(tp2_atr_mult, 2)}
     
     def _validate_geometry(self, log: SignalLog, atr: float, mode_config: Any) -> bool:
-        """Валидация геометрии сделки"""
-        
-        # Проверка 1: TP1 не должен быть слишком близко к Entry
+        """Валидация геометрии: TP1 не в шуме, стоп не гигантский, RR после комиссий ≥ порога."""
+        geo = self.config.get('geometry', {})
+        side_sign = 1.0 if log.side == "LONG" else -1.0
+
+        # TP1/TP2 по правильную сторону от входа, SL — по другую
+        if (log.tp1_final - log.entry_price) * side_sign <= 0 or (log.entry_price - log.sl_final) * side_sign <= 0:
+            log.add_ban_reason(BanReason.TP1_TOO_CLOSE, "геометрия вывернута (TP/SL не по своим сторонам)")
+            return False
+
         tp1_distance = abs(log.tp1_final - log.entry_price)
-        min_tp1_distance = atr * 0.15  # Минимум 0.15×ATR
-        
+        min_tp1_distance = atr * 0.15
         if tp1_distance < min_tp1_distance:
             log.add_ban_reason(
                 BanReason.TP1_TOO_CLOSE,
                 f"TP1 distance {tp1_distance:.4f} < 0.15×ATR ({min_tp1_distance:.4f})"
             )
             return False
-        
-        # Проверка 2: RR должен быть выше порога режима
-        # Получаем минимальный RR из mode_config (если есть)
-        min_rr = getattr(mode_config, 'min_rr_to_sl', 1.0)  # По умолчанию 1.0
-        
-        if log.rr_to_sl < min_rr:
+
+        max_sl_atr = float(geo.get('max_sl_atr', 3.0))
+        sl_atr = abs(log.entry_price - log.sl_final) / atr if atr > 0 else 999.0
+        if sl_atr > max_sl_atr:
+            log.add_ban_reason(BanReason.RISK_LIMIT, f"SL {sl_atr:.2f}×ATR > {max_sl_atr}×ATR")
+            return False
+
+        min_rr = float(geo.get('min_rr_tp1_net', 1.0))
+        rr_net = getattr(log, "_rr_tp1_net", log.rr_to_sl)
+        if rr_net < min_rr:
             log.add_ban_reason(
                 BanReason.RR_TOO_LOW,
-                f"RR {log.rr_to_sl:.2f} < min {min_rr:.2f}"
+                f"RR(TP1, net fees) {rr_net:.2f} < {min_rr:.2f} (gross {log.rr_to_sl:.2f})"
             )
             return False
-        
+
         return True
-    
+
     def _check_risk_limits(self, log: SignalLog, mode_name: str, timeframe: str, symbol: str) -> bool:
         """Проверка риск-лимитов"""
         from strategy.risk import _get_risk_manager
@@ -886,8 +948,8 @@ class StrategyPipeline:
             "tp2": log.tp2_final,
             "mode": log.mode,
             "trigger_type": log.trigger_type,
-            "rr_tp1": log.rr_tp1,
-            "rr_tp2": log.rr_tp2,
+            "rr_tp1": log.rr_to_sl,
+            "rr_tp2": log.rr_to_tp2,
             "k_pct": log.k_pct
         }
 

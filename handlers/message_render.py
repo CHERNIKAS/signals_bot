@@ -181,11 +181,11 @@ def _render_prices(log: SignalLog, tp_mid_price: Optional[float] = None) -> str:
     
     # TP1
     tp1_anchor = f"{log.tp1_anchor_type}({log.tp1_anchor_tf})" if log.tp1_anchor_tf else log.tp1_anchor_type
-    tp1_offset_text = f"offset {log.tp1_offset_atr:.2f}×ATR" if log.tp1_offset_atr > 0 else ""
+    tp1_offset_text = f", offset {log.tp1_offset_atr:.2f}×ATR" if log.tp1_offset_atr > 0 else ""
     
     lines.append(
         f"🎯 TP1:    <code>{tp1_str}</code>  "
-        f"(anchor: <b>{tp1_anchor}</b>, {tp1_offset_text})"
+        f"(anchor: <b>{tp1_anchor}</b>{tp1_offset_text})"
     )
     
     # TPmid (если задан)
@@ -214,7 +214,7 @@ def _render_prices(log: SignalLog, tp_mid_price: Optional[float] = None) -> str:
     # RR и Trail
     lines.append(
         f"📊 RR: <b>{log.rr_to_sl:.2f}</b> / <b>{log.rr_to_tp2:.2f}</b>   •   "
-        f"Trail: <b>{log.trail_atr:.4f}</b> (≈{log.trail_atr/log.atr:.2f}×ATR)"
+        f"Trail: <b>{log.trail_atr:.2f}×ATR</b> (≈{log.trail_atr*log.atr:.6g})"
     )
     
     return "\n".join(lines)

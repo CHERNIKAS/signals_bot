@@ -128,7 +128,7 @@ oi:
 
 # Funding
 funding:
-  now_abs_max: 0.0005       # Максимальный |funding| для входа
+  now_abs_max: 0.0005       # Максимальный |funding| для входа (ставка приведена к 8ч)
   ctx_rule: "not_against_sign"  # Правило для 24h funding: не против знака
 
 # Basis
@@ -213,3 +213,18 @@ safety:
   anomaly:
     doi_sigma: 5    # Бан при |ΔOI| > 5σ
 
+
+# Комиссии Binance USDⓈ-M (VIP0, тейкер). Учитываются в RR: вход + выход = 2 × taker
+fees:
+  taker: 0.0005
+
+# Геометрия сделки
+geometry:
+  min_rr_tp1_net: 1.0       # Минимальный RR до TP1 ПОСЛЕ комиссий
+  tp1_rr_backup: 1.5        # Если встречного уровня нет: TP1 = entry ± 1.5 × дистанция SL
+  max_sl_atr: 3.0           # Стоп дальше 3×ATR — слишком большой риск, бан
+  tp1_max_atr: 3.0          # TP1 не дальше 3×ATR (дальний уровень не реален за горизонт удержания)
+
+# Позиция
+position:
+  be_offset_atr: 0.2        # BE = entry ± 0.2×ATR после TP1

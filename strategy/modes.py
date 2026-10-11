@@ -92,37 +92,30 @@ class ModeManager:
         side: str,
         atr: float,
         atr_pct: float,
-        mode: ModeConfig
+        mode: ModeConfig,
+        buffer_atr: float = None,
+        min_mult_add: float = 0.0
     ) -> float:
         """
-        Вычисляет SL на основе структурного уровня с буфером
-        
-        SL_final = max(
-            structural_level ± buffer(mode),
-            entry ± sl_min_mult_atr_pct(mode) × atr_pct
-        )
-        
-        Args:
-            entry_price: Цена входа
-            structural_level: Структурный уровень (swing/FVG/liquidity)
-            side: "LONG" или "SHORT"
-            atr: ATR значение
-            atr_pct: ATR в процентах от цены
-            mode: Конфигурация режима
-        
-        Returns:
-            SL цена
+        SL за структурным уровнем с буфером, но НЕ ближе волатильного минимума.
+
+        Берётся более ДАЛЬНИЙ из двух стопов:
+            LONG:  min(level - buffer, entry × (1 - k × atr_pct))
+            SHORT: max(level + buffer, entry × (1 + k × atr_pct))
+        где k = sl_min_mult_atr_pct(mode) + min_mult_add.
+        (Раньше тут был max/min наоборот — стоп ставился ближе минимума, внутрь шума.)
         """
-        buffer = mode.sl_buffer_atr * atr
+        buffer = (mode.sl_buffer_atr if buffer_atr is None else buffer_atr) * atr
+        k = mode.sl_min_mult_atr_pct[0] + min_mult_add
         
         if side == "LONG":
             sl_structural = structural_level - buffer
-            sl_min = entry_price * (1 - mode.sl_min_mult_atr_pct[0] * atr_pct)
-            return max(sl_structural, sl_min)
+            sl_min = entry_price * (1 - k * atr_pct)
+            return min(sl_structural, sl_min)
         else:  # SHORT
             sl_structural = structural_level + buffer
-            sl_min = entry_price * (1 + mode.sl_min_mult_atr_pct[0] * atr_pct)
-            return min(sl_structural, sl_min)
+            sl_min = entry_price * (1 + k * atr_pct)
+            return max(sl_structural, sl_min)
     
     def calculate_tp1_from_level(
         self,
@@ -157,7 +150,8 @@ class ModeManager:
         entry_price: float,
         side: str,
         atr_pct: float,
-        mode: ModeConfig
+        mode: ModeConfig,
+        mult_add: float = 0.0
     ) -> float:
         """
         Вычисляет TP2 как RR-бэкап (если нет уровня)
@@ -173,7 +167,7 @@ class ModeManager:
         Returns:
             TP2 цена
         """
-        mult = mode.tp2_mult_atr_pct[0]
+        mult = mode.tp2_mult_atr_pct[0] + mult_add
         
         if side == "LONG":
             return entry_price * (1 + mult * atr_pct)
