@@ -1,0 +1,40 @@
+name: signal-bot-2026
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      SCHEDULE_MINUTES: ${SCHEDULE_MINUTES:-1}
+      POLLING_RETRY_SECONDS: ${POLLING_RETRY_SECONDS:-10}
+      FRESH_ONLY: ${FRESH_ONLY:-0}
+      WORKERS: ${WORKERS:-8}
+      EVAL_TIMEOUT: ${EVAL_TIMEOUT:-20}
+      TICK_TIMEOUT: ${TICK_TIMEOUT:-180}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-signal_bot}:${POSTGRES_PASSWORD:-signal_bot_pass}@postgres:5432/${POSTGRES_DB:-signal_bot}
+      PGSSL: ${PGSSL:-disable}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-signal_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-signal_bot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-signal_bot_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-signal_bot} -d ${POSTGRES_DB:-signal_bot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  postgres_data:

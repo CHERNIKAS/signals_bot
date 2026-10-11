@@ -1,0 +1,215 @@
+# ============================================================================
+# THRESHOLDS.YAML — Адаптивные пороги для мульти-режимной стратегии
+# ============================================================================
+
+# Режимы торговли (Scalp/Intraday/Swing)
+modes:
+  scalp:
+    validity_mult: [1, 2]           # Множитель TF для validity window
+    hold_mult: [4, 8]               # Множитель TF для hold window
+    sl_buffer_atr: 0.15             # Буфер SL в ATR
+    sl_min_mult_atr_pct: [1.25, 1.35]  # Минимальный SL как множитель atr_pct
+    tp1_offset_atr: [0.10, 0.15]    # Отступ TP1 от уровня в ATR
+    tp2_mult_atr_pct: [2.4, 2.8]    # TP2 как множитель atr_pct (если нет уровня)
+    btc_lock_min: 15                # Минимальный lock BTC (минуты)
+    
+  intraday:
+    validity_mult: [1, 2]
+    hold_mult: [1, 2]
+    sl_buffer_atr: 0.22
+    sl_min_mult_atr_pct: [1.40, 1.55]
+    tp1_offset_atr: [0.15, 0.20]
+    tp2_mult_atr_pct: [3.0, 3.6]
+    btc_lock_min: 30
+    
+  swing:
+    validity_mult: [1, 2]
+    hold_mult: [1, 3]
+    sl_buffer_atr: 0.30
+    sl_min_mult_atr_pct: [1.60, 1.80]
+    tp1_offset_atr: [0.20, 0.25]
+    tp2_mult_atr_pct: [4.0, 5.0]
+    btc_lock_min: 60
+
+# Маппинг таймфрейма на режим
+tf_to_mode:
+  "5m": "scalp"
+  "15m": "scalp"
+  "30m": "intraday"
+  "1h": "intraday"
+  "4h": "swing"
+  "1d": "swing"
+
+# Адаптивные ворота волатильности (квантили atr_pct)
+atr_pct_quantiles:
+  scalp: [0.30, 0.70]      # 30-70 перцентиль
+  intraday: [0.20, 0.80]   # 20-80 перцентиль
+  swing: [0.15, 0.85]      # 15-85 перцентиль
+
+# Импульс цены
+impulse:
+  base_minutes: 180         # Базовое окно в минутах
+  n_bounds: [3, 36]         # Границы N (количество баров)
+  
+  # PathScore минимум по режимам
+  pathscore_min:
+    scalp: 0.85
+    intraday: 0.80
+    swing: 0.90
+  
+  # Anti-chop (максимальный откат в ATR)
+  anti_chop_atr:
+    scalp: 0.60
+    intraday: 0.70
+    swing: 0.90
+  
+  # Монотоничность
+  monotonicity:
+    body_share_min:
+      scalp: 0.60
+      intraday: 0.60
+      swing: 0.70
+    body_ratio_min:
+      scalp: 1.7
+      intraday: 1.6
+      swing: 1.8
+  
+  # Минимальное расстояние до встречного уровня (в ATR)
+  distance_to_level_atr:
+    scalp: 0.70
+    intraday: 0.90
+    swing: 1.20
+
+# Уровни (swings/FVG/liquidity)
+levels:
+  # K для N-bar swings по таймфреймам
+  swing_k_by_tf:
+    "5m": 3
+    "15m": 3
+    "30m": 2
+    "1h": 2
+    "4h": 2
+    "1d": 1
+  
+  fvg_min_width_atr: 0.10   # Минимальная ширина FVG в ATR
+  
+  # Epsilon для equal highs/lows
+  equal_eps:
+    atr_mult: 0.05
+    spread_mult: 0.5
+  
+  cluster_delta_atr: 0.25   # Расстояние для кластеризации уровней
+  top_k: 12                 # Максимальное количество топ-уровней
+  
+  # Веса для ранжирования уровней
+  weights:
+    recency: 0.20
+    reaction: 0.25
+    type: 0.20
+    htf: 0.15
+    cluster: 0.10
+    distance: 0.10
+
+# OI Flow
+oi:
+  history_mult: 5           # Множитель для истории (H = history_mult × N)
+  
+  # Перцентиль для flow по режимам
+  flow_percentile:
+    scalp: 50
+    intraday: 60
+    swing: 70
+  
+  # Magnitude gate (|OI_Flow| / median(|ΔOI|))
+  mag_gate:
+    scalp: 0.8
+    intraday: 1.0
+    swing: 1.2
+
+# Funding
+funding:
+  now_abs_max: 0.0005       # Максимальный |funding| для входа
+  ctx_rule: "not_against_sign"  # Правило для 24h funding: не против знака
+
+# Basis
+basis:
+  long_floor: -0.0005       # Минимальный basis для LONG
+  short_ceiling: 0.0005     # Максимальный basis для SHORT
+
+# BTC ветер
+btc:
+  # Опорные таймфреймы для анализа BTC по режимам
+  wind_anchor_tfs:
+    scalp: ["1m", "5m", "15m"]
+    intraday: ["5m", "15m", "1h"]
+    swing: ["1h", "4h", "1d"]
+
+# Триггеры
+triggers:
+  types_enabled: ["TC", "BR", "FVR", "LSR", "EPS", "LQS"]
+  
+  # Поправки к геометрии по типам триггеров
+  adjustments:
+    TC:   # Trend Continuation
+      tp2_mult_add_atr_pct: 0.2
+    
+    BR:   # Breakout Retest
+      sl_anchor: "retest_level"
+    
+    FVR:  # FVG Retest
+      sl_anchor: "fvg_far_edge"
+    
+    LSR:  # Level Support/Resistance
+      sl_buffer_add_atr: 0.05
+      trail_add_atr: 0.05
+    
+    EPS:  # Exhaustion Push Short (PathScore↑ & OI_Flow≤0)
+      sl_min_add_atr_pct: 0.05
+      tp1_add_atr_pct: 0.1
+    
+    LQS:  # Liquidity Squeeze (PathScore↓ & OI_Flow>0)
+      sl_min_add_atr_pct: 0.05
+      tp1_add_atr_pct: 0.1
+
+# Риск менеджмент
+risk:
+  k_pct_base: 0.01          # Базовый размер позиции (1%)
+  
+  # Максимальное количество одновременных позиций по режимам
+  max_concurrent:
+    scalp: 5
+    intraday: 3
+    swing: 2
+  
+  per_symbol_cap_mult: 2    # Максимум на символ = 2 × k_base
+  
+  # Кулдауны
+  cooldown:
+    between_signals_min: 20  # Между любыми сигналами
+    
+    # После 1 SL (минуты)
+    after_1sl_min:
+      scalp: 90
+      intraday: 180
+      swing: 480
+    
+    # После 2 SL подряд (часы)
+    after_2sl_hours:
+      scalp: 12
+      intraday: 12
+      swing: 24
+
+# Safety (фильтры безопасности)
+safety:
+  session_ban_utc: ["03:00-07:00"]  # Запрещённые сессии UTC
+  news_blackout_min: 30              # Блокировка вокруг новостей (минуты)
+  
+  # Экстремальные значения Taker Buy Share
+  taker_extremes:
+    long_gt: 0.70   # LONG бан если taker > 70%
+    short_lt: 0.30  # SHORT бан если taker < 30%
+  
+  # Аномалии OI
+  anomaly:
+    doi_sigma: 5    # Бан при |ΔOI| > 5σ
+
