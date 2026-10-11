@@ -4800,6 +4800,19 @@ def register(application: Application):
         first=120  # первый запуск через 2 минуты после старта
     )
     
+    # 4. Исследовательский режим: кандидаты по всем гейтам + их исходы (пользователям не шлётся)
+    from jobs import _job_research_record, _job_research_resolve
+    from database import db_enabled as _db_enabled
+    if _db_enabled():
+        try:
+            from research import ensure_schema
+            ensure_schema()
+            application.job_queue.run_repeating(_job_research_record, interval=60, first=30)
+            application.job_queue.run_repeating(_job_research_resolve, interval=5 * 60, first=90)
+            print("[JOB] Research recorder scheduled (every 1 min) + resolver (every 5 min)")
+        except Exception as e:
+            print(f"[JOB] Research disabled: {e}")
+    
     print("[HANDLERS] All handlers registered")
     print(f"[JOB] Signal generation scheduled every {schedule_minutes} minute(s)")
     print("[JOB] Outcome updates scheduled every 5 minutes")

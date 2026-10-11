@@ -281,3 +281,36 @@ def btc_context(tfs: List[str], limit: int = 120) -> Dict[str, pd.DataFrame]:
         except Exception as e:
             print(f"[MARKET] BTC {tf} failed: {e}")
     return out
+
+
+# =============================================================================
+# ВСЕЛЕННАЯ СИМВОЛОВ
+# =============================================================================
+
+def crypto_perpetuals() -> List[str]:
+    """Торгуемые USDT-перпетуалы на крипту. TradFi-перпы (акции, нефть, золото:
+    contractType=TRADIFI_PERPETUAL) исключаем — у них свои торговые часы и BTC-ветер к ним не относится.
+    Кэш 6ч."""
+    def load():
+        j = _get("/fapi/v1/exchangeInfo", timeout=15)
+        out = [
+            x["symbol"] for x in j.get("symbols", [])
+            if x.get("contractType") == "PERPETUAL"
+            and x.get("underlyingType") == "COIN"
+            and x.get("status") == "TRADING"
+            and x.get("quoteAsset") == "USDT"
+        ]
+        return out, time.time() + 6 * 3600
+
+    return MARKET_CACHE.get_or_load(("crypto_perpetuals",), load)
+
+
+def top_crypto_by_volume(n: int) -> List[str]:
+    """Топ-N крипто-перпов по 24h quote volume. Кэш 1ч."""
+    def load():
+        allowed = set(crypto_perpetuals())
+        tick = _get("/fapi/v1/ticker/24hr", timeout=15)
+        rows = sorted((t for t in tick if t["symbol"] in allowed), key=lambda t: -float(t["quoteVolume"]))
+        return [t["symbol"] for t in rows], time.time() + 3600
+
+    return MARKET_CACHE.get_or_load(("top_crypto",), load)[:n]

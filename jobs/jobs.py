@@ -661,6 +661,28 @@ async def _job_tick(ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # =============================================================================
+# RESEARCH (режим «только лог»: все гейты по выборке пар + исходы)
+# =============================================================================
+
+async def _job_research_record(ctx: ContextTypes.DEFAULT_TYPE):
+    """Раз в минуту: если по какому-то ТФ закрылась новая свеча — пишем кандидатов."""
+    from research import record_closed_bars
+    try:
+        await asyncio.to_thread(record_closed_bars, EXEC)
+    except Exception as e:
+        print(f"[RESEARCH] record ERROR: {e}")
+
+
+async def _job_research_resolve(ctx: ContextTypes.DEFAULT_TYPE):
+    """Раз в 5 минут: досчитываем исходы кандидатов, у которых прошёл горизонт."""
+    from research import resolve_outcomes
+    try:
+        await asyncio.to_thread(resolve_outcomes)
+    except Exception as e:
+        print(f"[RESEARCH] resolve ERROR: {e}")
+
+
+# =============================================================================
 # OUTCOME UPDATER
 # =============================================================================
 

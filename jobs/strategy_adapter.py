@@ -14,16 +14,21 @@ from handlers.message_render import render_signal_card
 from database import db_log_signal_ban
 
 
-# Глобальный экземпляр пайплайна (создаётся один раз при импорте)
+import threading
+
+# Глобальный экземпляр пайплайна (создаётся один раз, потокобезопасно)
 _pipeline = None
+_pipeline_lock = threading.Lock()
 
 
 def get_strategy_pipeline() -> StrategyPipeline:
     """Возвращает синглтон экземпляр StrategyPipeline"""
     global _pipeline
     if _pipeline is None:
-        _pipeline = StrategyPipeline()
-        print("[STRATEGY_ADAPTER] StrategyPipeline initialized")
+        with _pipeline_lock:
+            if _pipeline is None:
+                _pipeline = StrategyPipeline()
+                print("[STRATEGY_ADAPTER] StrategyPipeline initialized")
     return _pipeline
 
 

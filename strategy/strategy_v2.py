@@ -110,15 +110,22 @@ class StrategyPipeline:
         side: str,
         mode_name: str,
         mode_config: Any,
-        features: Dict[str, Any]
+        features: Dict[str, Any],
+        collect_all: bool = False
     ) -> SignalLog:
         """
         Запускает полный пайплайн гейтов для одной стороны
+        
+        collect_all=True — исследовательский режим: не останавливаемся на первом бане,
+        прогоняем ВСЕ гейты и геометрию, чтобы записать метрики каждого гейта
+        (потом по исходам видно, какие гейты реально отсеивают убыточные сделки).
+        Ban-логи при этом не печатаются.
         
         Returns:
             SignalLog с результатом (PASSED или BANNED)
         """
         log = create_signal_log(symbol, timeframe, side)
+        log.quiet = collect_all
         log.mode = mode_name
         
         # Извлекаем данные из features
@@ -128,7 +135,8 @@ class StrategyPipeline:
         
         # ========== 1. ATR GATE ==========
         if not self._check_atr_gate(log, atr, atr_pct, mode_name, features.get("ohlc")):
-            return log
+            if not collect_all:
+                return log
         
         # ========== 2. IMPULSE GATE ==========
         impulse_data = self._calculate_impulse(
@@ -139,13 +147,15 @@ class StrategyPipeline:
             atr=atr
         )
         if not self._check_impulse_gate(log, impulse_data, mode_name):
-            return log
+            if not collect_all:
+                return log
 
         # LONG только по бычьему импульсу. SHORT — по медвежьему, либо по бычьему,
         # если ниже OI-гейт распознает EPS (рост без новых позиций)
         if side == "LONG" and log.pathscore <= 0:
             log.add_ban_reason(BanReason.IMPULSE_LOW_PATHSCORE, f"PathScore={log.pathscore:+.2f}: импульс против LONG")
-            return log
+            if not collect_all:
+                return log
         
         # ========== 3. SPACE/LEVELS GATE ==========
         levels_data = self._get_or_calculate_levels(
@@ -156,7 +166,8 @@ class StrategyPipeline:
             price_now=price_now
         )
         if not self._check_space_gate(log, price_now, levels_data, side, atr, mode_name):
-            return log
+            if not collect_all:
+                return log
         
         # ========== 4. OI FLOW GATE ==========
         flow_data = self._calculate_oi_flow(
@@ -166,19 +177,23 @@ class StrategyPipeline:
             pathscore=impulse_data.get("pathscore", 0)
         )
         if not self._check_oi_flow_gate(log, flow_data, side, impulse_data, mode_name):
-            return log
+            if not collect_all:
+                return log
 
         if side == "SHORT" and log.pathscore > 0 and flow_data.get("short_case_type") != "EPS":
             log.add_ban_reason(BanReason.IMPULSE_LOW_PATHSCORE, f"PathScore={log.pathscore:+.2f}: импульс против SHORT (не EPS)")
-            return log
+            if not collect_all:
+                return log
         
         # ========== 5. FUNDING/BASIS GATE ==========
         if not self._check_funding_gate(log, features.get("funding", 0), features.get("funding_24h_sign", 0), side,
                                         features.get("funding_interval_h", 8)):
-            return log
+            if not collect_all:
+                return log
         
         if not self._check_basis_gate(log, features.get("basis", 0), side):
-            return log
+            if not collect_all:
+                return log
         
         # ========== 6. BTC WIND GATE ==========
         btc_wind = self._calculate_btc_wind(
@@ -187,18 +202,22 @@ class StrategyPipeline:
             atr_btc=features.get("atr_btc", 0)
         )
         if not self._check_btc_wind_gate(log, btc_wind, side):
-            return log
+            if not collect_all:
+                return log
         
         # ========== 7. TAKER/SAFETY GATES ==========
         if not self._check_taker_gate(log, features.get("taker_buy_share", 0.5), side):
-            return log
+            if not collect_all:
+                return log
         
         if not self._check_safety_gates(log):
-            return log
+            if not collect_all:
+                return log
         
         # ========== 7.5 POSITIONING (правила v1: кто входит в рынок) ==========
         if not self._check_positioning_gate(log, features, side):
-            return log
+            if not collect_all:
+                return log
         
         # ========== 8. TRIGGER DETECTION ==========
         trigger_type = self.trigger_manager.detect_trigger_type(
@@ -222,11 +241,13 @@ class StrategyPipeline:
         
         # ========== 9.5. GEOMETRY VALIDATION ==========
         if not self._validate_geometry(log, atr, mode_config):
-            return log
+            if not collect_all:
+                return log
         
         # ========== 10. RISK CHECK ==========
         if not self._check_risk_limits(log, mode_name, timeframe, symbol):
-            return log
+            if not collect_all:
+                return log
         
         # ========== ВСЕ ГЕЙТЫ ПРОЙДЕНЫ! ==========
         # Вычисляем Validity и Hold windows
@@ -275,6 +296,7 @@ class StrategyPipeline:
             return False
 
         rank = float((atr_hist < atr_pct).mean())
+        log._atr_rank = rank
         lo_v, hi_v = float(atr_hist.quantile(q_low)), float(atr_hist.quantile(q_high))
 
         if rank < q_low:

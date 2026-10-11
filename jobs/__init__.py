@@ -10,6 +10,8 @@ from jobs.jobs import (
     _job_update_outcomes,
     _job_eod_close_and_digest,
     send_telegram,
+    _job_research_record,
+    _job_research_resolve,
 )
 
 __all__ = [
@@ -19,4 +21,6 @@ __all__ = [
     "_job_update_outcomes",
     "_job_eod_close_and_digest",
     "send_telegram",
+    "_job_research_record",
+    "_job_research_resolve",
 ]

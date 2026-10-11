@@ -65,6 +65,8 @@ class SignalLog:
     
     status: SignalStatus = SignalStatus.PENDING
     ban_reasons: List[BanReason] = field(default_factory=list)
+    ban_details: List[str] = field(default_factory=list)
+    quiet: bool = False         # не печатать [BAN] (исследовательский режим)
     
     # ========== LIFECYCLE ==========
     valid_until: Optional[datetime] = None      # Validity window end
@@ -239,7 +241,10 @@ class SignalLog:
     def add_ban_reason(self, reason: BanReason, details: str = ""):
         """Добавляет причину блокировки"""
         self.ban_reasons.append(reason)
+        self.ban_details.append(f"{reason.value}: {details}")
         self.status = SignalStatus.BANNED
+        if self.quiet:
+            return
         print(f"[BAN] {self.symbol} {self.timeframe} {self.side}: {reason.value} - {details}")
     
     @property
@@ -255,7 +260,8 @@ class SignalLog:
         """Помечает сигнал как прошедший все гейты"""
         if self.status == SignalStatus.PENDING:
             self.status = SignalStatus.PASSED
-            print(f"[PASS] {self.symbol} {self.timeframe} {self.side} - {self.trigger_type} | Mode: {self.mode}")
+            if not self.quiet:
+                print(f"[PASS] {self.symbol} {self.timeframe} {self.side} - {self.trigger_type} | Mode: {self.mode}")
     
     def build_gates_dict(self):
         """Строит dict gates для карточки (светофор)"""

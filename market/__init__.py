@@ -17,6 +17,8 @@ from market.data import (
     taker_ratio_hist,
     top_ls_accounts_hist,
     btc_context,
+    crypto_perpetuals,
+    top_crypto_by_volume,
 )
 
 __all__ = [
@@ -34,4 +36,6 @@ __all__ = [
     "taker_ratio_hist",
     "top_ls_accounts_hist",
     "btc_context",
+    "crypto_perpetuals",
+    "top_crypto_by_volume",
 ]
